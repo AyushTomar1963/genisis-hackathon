@@ -1,99 +1,87 @@
-    # src/train.py
-from __future__ import annotations
-
-import logging
-from pathlib import Path
-import numpy as np
-import joblib
-
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score, f1_score
-
-from src.data_pipeline import load_and_preprocess_data, engineer_features
-
-# ---------------------- config ----------------------
-MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
-TARGET_COL = "is_congested"     # change when real label available
-TIME_COL = "timestamp"
-N_SPLITS = 3
-RANDOM_STATE = 42
-
-# ---------------------- logging ---------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+# Cell 5: Train the Model
+# Define callbacks
+early_stopping = EarlyStopping(
+    monitor='val_loss', 
+    patience=15, 
+    restore_best_weights=True,
+    verbose=1
 )
-log = logging.getLogger("train")
 
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss', 
+    factor=0.5, 
+    patience=8, 
+    min_lr=0.0001,
+    verbose=1
+)
 
-def _dummy_data(n=180, d=6, seed=RANDOM_STATE):
-    rng = np.random.default_rng(seed)
-    X = rng.normal(size=(n, d))
-    X += np.linspace(0, 1, n).reshape(-1, 1)  # mild drift
-    y = rng.integers(0, 2, size=n)
-    return X, y
+callbacks = [early_stopping, reduce_lr]
 
+# Train the model
+print("Starting model training...")
+history = model.fit(
+    X_train,
+    {
+        'classification': y_class_train,
+        'regression': y_reg_train
+    },
+    validation_data=(
+        X_test,
+        {
+            'classification': y_class_test,
+            'regression': y_reg_test
+        }
+    ),
+    epochs=100,
+    batch_size=32,
+    callbacks=callbacks,
+    verbose=1
+)
 
-def _select_Xy(df):
-    # keep only numeric features; drop obvious non-features
-    drop = {TARGET_COL, TIME_COL, "device_name", "link_id", "interface"}
-    numeric_cols = [c for c in df.columns if c not in drop and np.issubdtype(df[c].dtype, np.number)]
-    if not numeric_cols:
-        raise ValueError("No numeric features found. Add engineered features or adjust drops.")
-    X = df[numeric_cols].to_numpy(dtype=float)
-    y = df[TARGET_COL].to_numpy()
-    return X, y, numeric_cols
+print("Training completed!")
 
+# Plot training history
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
-def train_model():
-    log.info("Loading data...")
-    df = load_and_preprocess_data()
-    df = engineer_features(df)
+# Classification accuracy
+axes[0, 0].plot(history.history['classification_accuracy'], label='Train Accuracy')
+axes[0, 0].plot(history.history['val_classification_accuracy'], label='Val Accuracy')
+axes[0, 0].set_title('Classification Accuracy')
+axes[0, 0].set_xlabel('Epoch')
+axes[0, 0].set_ylabel('Accuracy')
+axes[0, 0].legend()
+axes[0, 0].grid(True)
 
-    used_dummy = False
-    if df is None:
-        log.warning("No dataframe from pipeline; using dummy data.")
-        X, y = _dummy_data()
-        feature_names = [f"f{i}" for i in range(X.shape[1])]
-        used_dummy = True
-    else:
-        # create a synthetic target if not present (structure demo)
-        if TARGET_COL not in df.columns:
-            log.warning("Target '%s' missing. Creating synthetic target from utilization > 0.8.", TARGET_COL)
-            df[TARGET_COL] = (df.get("bandwidth_utilization", 0) > 0.8).astype(int)
-        if TIME_COL in df.columns:
-            df = df.sort_values(TIME_COL)
-        X, y, feature_names = _select_Xy(df)
+# Classification loss
+axes[0, 1].plot(history.history['classification_loss'], label='Train Loss')
+axes[0, 1].plot(history.history['val_classification_loss'], label='Val Loss')
+axes[0, 1].set_title('Classification Loss')
+axes[0, 1].set_xlabel('Epoch')
+axes[0, 1].set_ylabel('Loss')
+axes[0, 1].legend()
+axes[0, 1].grid(True)
 
-    # model + time-series CV
-    clf = RandomForestClassifier(
-        n_estimators=250,
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
-        class_weight="balanced_subsample",
-    )
-    tscv = TimeSeriesSplit(n_splits=N_SPLITS)
+# Regression MAE
+axes[1, 0].plot(history.history['regression_mae'], label='Train MAE')
+axes[1, 0].plot(history.history['val_regression_mae'], label='Val MAE')
+axes[1, 0].set_title('Regression MAE')
+axes[1, 0].set_xlabel('Epoch')
+axes[1, 0].set_ylabel('MAE')
+axes[1, 0].legend()
+axes[1, 0].grid(True)
 
-    accs, f1s = [], []
-    log.info("Starting TimeSeriesSplit (%d folds)...", N_SPLITS)
-    for i, (tr, te) in enumerate(tscv.split(X), start=1):
-        clf.fit(X[tr], y[tr])
-        pred = clf.predict(X[te])
-        acc = accuracy_score(y[te], pred)
-        f1 = f1_score(y[te], pred, average="binary")
-        accs.append(acc); f1s.append(f1)
-        log.info("Fold %d | acc: %.3f | f1: %.3f", i, acc, f1)
+# Total loss
+axes[1, 1].plot(history.history['loss'], label='Train Total Loss')
+axes[1, 1].plot(history.history['val_loss'], label='Val Total Loss')
+axes[1, 1].set_title('Total Loss')
+axes[1, 1].set_xlabel('Epoch')
+axes[1, 1].set_ylabel('Loss')
+axes[1, 1].legend()
+axes[1, 1].grid(True)
 
-    log.info("CV mean | acc: %.3f | f1: %.3f", np.mean(accs), np.mean(f1s))
+plt.tight_layout()
+plt.show()
 
-    # fit on full data and save
-    clf.fit(X, y)
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = MODELS_DIR / "netsense_rf.pkl"
-    joblib.dump({"model": clf, "features": feature_names, "used_dummy": used_dummy}, out_path)
-    log.info("Saved model -> %s", out_path)
-
-
-if __name__ == "__main__":
-    train_model()
+# Save the model
+model.save('multitask_lstm_network_model.h5')
+print("Model saved as 'multitask_lstm_network_model.h5'")
